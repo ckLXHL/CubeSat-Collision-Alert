@@ -1,0 +1,10 @@
+name = "cubesat-collision-alert"
+main = "worker/index.ts"
+compatibility_date = "2026-03-01"
+
+[[kv_namespaces]]
+binding = "TLE_KV"
+id = "your_kv_namespace_id"
+
+[triggers]
+crons = ["0 */6 * * *"]
