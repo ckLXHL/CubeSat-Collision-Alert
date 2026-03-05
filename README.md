@@ -1,6 +1,8 @@
 # CubeSat Collision Alert 🛰️
 
-A lightweight, serverless collision monitoring platform for LEO satellites, updated every 6 hours.
+A lightweight, serverless LEO satellite collision monitoring platform.
+
+> **Data cadence:** Conjunction predictions and TLEs are fetched from CelesTrak SOCRATES every **6 hours** via a scheduled Cron Trigger. The 3-D orbit visualization and risk dashboard always animate in **real time** using the latest cached data. Telegram alert pushes are also sent every **6 hours** when new high-risk events are detected.
 
 ## Architecture
 
@@ -17,12 +19,13 @@ A lightweight, serverless collision monitoring platform for LEO satellites, upda
 
 ## Features
 
-| Module | Description |
-|--------|-------------|
-| **Risk Dashboard** | Live-scrolling list of the top 10 highest-risk satellite pairs in the next 72 hours, with collision probability gauges and configurable alert threshold (< 10 km). |
-| **TOCA View** | 3-D CesiumJS visualization of the Time of Closest Approach for any selected conjunction event. |
-| **CDM Translator** | Client-side parser for CDM (KVN or XML) files — converts covariance matrices into progress-bar Pc meters and 3-D confidence ellipsoids. No data leaves the browser. |
-| **TLE Freshness** | Stale-data banner when TLE epoch is > 24 hours old. |
+| Module | Cadence | Description |
+|--------|---------|-------------|
+| **Risk Dashboard** | reflects 6-h data | Live-scrolling list of the top 10 highest-risk satellite pairs in the next 72 hours, with collision probability gauges and configurable alert threshold (< 10 km). |
+| **TOCA View** | real-time animation | 3-D CesiumJS visualization of the Time of Closest Approach for any selected conjunction event. Orbit positions are computed client-side via satellite.js SGP4, so the animation runs in real time. |
+| **CDM Translator** | on upload | Client-side parser for CDM (KVN or XML) files — converts covariance matrices into progress-bar Pc meters and 3-D confidence ellipsoids. No data leaves the browser. |
+| **TLE Freshness** | on load | Stale-data banner when TLE epoch is > 24 hours old. |
+| **Telegram Alerts** | every 6 h | Push notification to a configured Telegram channel whenever a new high-risk conjunction event (< 10 km) appears after a SOCRATES refresh. |
 
 ## Directory Structure
 
@@ -136,6 +139,18 @@ Example response from `/api/conjunctions`:
 |----------|-------|-------------|
 | `VITE_API_BASE` | Frontend build | Override API base URL (default: `/api`) |
 | `VITE_CESIUM_TOKEN` | Frontend build | Cesium Ion token for satellite imagery |
+| `TELEGRAM_BOT_TOKEN` | Worker secret | Telegram bot token for alert push notifications |
+| `TELEGRAM_CHAT_ID` | Worker secret | Telegram chat/channel ID to receive alerts |
+
+## Data Freshness & Update Cadence
+
+| What | How often | Notes |
+|------|-----------|-------|
+| SOCRATES conjunction predictions | Every 6 h | Fetched by the Cron Trigger; stored in `conjunctions:latest` KV key |
+| High-risk TLE set | Every 6 h | Only TLEs for satellites in the high-risk list; stored in `tle:high_risk` KV key |
+| Telegram alert push | Every 6 h | Sent after each successful SOCRATES refresh if new high-risk events exist |
+| CesiumJS orbit animation | Real time | Positions are propagated client-side (satellite.js SGP4) from the cached TLE data |
+| TLE staleness warning | On page load | Dashboard shows a warning banner when the TLE epoch is > 24 h old |
 
 ## Feedback & Support
 
