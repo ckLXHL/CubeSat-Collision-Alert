@@ -21,20 +21,20 @@ export interface TLERecord {
   epoch: string;
 }
 
-export interface TOCAPosition {
-  time: string;
-  sat1_pos: [number, number, number];
-  sat2_pos: [number, number, number];
-  distance_km: number;
-}
-
-export interface TOCAData {
+/**
+ * Response for /api/conjunction/:id/toca
+ * Returns the TLE data for both satellites so the frontend can run
+ * SGP4 propagation (via satellite.js) client-side.
+ */
+export interface TOCAResponse {
   id: string;
   toca: string;
   min_distance_km: number;
-  positions: TOCAPosition[];
+  sat1_tle: TLERecord;
+  sat2_tle: TLERecord;
 }
 
 export interface KVEnv {
   TLE_KV: KVNamespace;
 }
+

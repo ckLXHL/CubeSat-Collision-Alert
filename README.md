@@ -1,17 +1,18 @@
 # CubeSat Collision Alert 🛰️
 
-A lightweight, serverless near-real-time collision monitoring platform for LEO satellites.
+A lightweight, serverless collision monitoring platform for LEO satellites, updated every 6 hours.
 
 ## Architecture
 
 ```
-[CelesTrak]
+[CelesTrak SOCRATES]
      ↓  Cron Trigger (every 6 h)
-[Cloudflare Workers]  →  TLE fetch, conjunction computation, KV write
+[Cloudflare Workers]  →  Fetch SOCRATES CSV, parse/filter high-risk conjunctions,
+                          fetch TLEs only for involved satellites, KV write
      ↓
-[Cloudflare KV]  →  TLE data · high-risk list · timestamps
+[Cloudflare KV]  →  high-risk conjunction list · high-risk-only TLE set · timestamps
      ↓  REST API
-[Cloudflare Pages]  →  Static frontend (Vite + TypeScript + CesiumJS CDN)
+[Cloudflare Pages]  →  Static frontend (Vite + TypeScript + CesiumJS CDN + satellite.js)
 ```
 
 ## Features
@@ -32,16 +33,16 @@ A lightweight, serverless near-real-time collision monitoring platform for LEO s
 │   ├── src/
 │   │   ├── main.ts         # App entry point & tab wiring
 │   │   ├── dashboard.ts    # Risk dashboard module
-│   │   ├── toca.ts         # TOCA 3-D view (CesiumJS)
+│   │   ├── toca.ts         # TOCA 3-D view (CesiumJS + satellite.js SGP4)
 │   │   ├── cdm-parser.ts   # CDM translator (client-side)
 │   │   └── api.ts          # Worker API client
 │   ├── vite.config.ts
 │   └── package.json
-├── worker/                 # Cloudflare Workers backend
+├── worker/                 # Cloudflare Workers backend (lightweight data pipeline)
 │   ├── index.ts            # API router + scheduled handler
-│   ├── cron.ts             # Cron job: fetch TLE + compute conjunctions
-│   ├── conjunction.ts      # SGP4 propagation + conjunction screening
-│   ├── tle.ts              # TLE fetch & parse utilities
+│   ├── cron.ts             # Cron job: fetch SOCRATES + targeted TLE + KV write
+│   ├── socrates.ts         # SOCRATES CSV fetch, parse & filter
+│   ├── tle.ts              # Targeted TLE fetch by NORAD ID list
 │   └── types.ts            # Shared TypeScript interfaces
 ├── wrangler.toml           # Cloudflare Worker + KV + Cron config
 └── package.json
@@ -96,10 +97,10 @@ wrangler deploy
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/conjunctions` | Precomputed high-risk conjunction list (next 72 h) |
-| `GET` | `/api/tle?page=1&limit=100` | Paginated TLE data |
+| `GET` | `/api/conjunctions` | High-risk conjunction list parsed from SOCRATES (next 72 h) |
+| `GET` | `/api/tle/high-risk` | TLEs for all satellites currently in the high-risk list |
 | `GET` | `/api/tle/:id` | Single satellite TLE (by NORAD ID or name) |
-| `GET` | `/api/conjunction/:id/toca` | TOCA position sequence for a conjunction |
+| `GET` | `/api/conjunction/:id/toca` | TOCA time + TLE data for client-side SGP4 propagation |
 | `GET` | `/api/health` | Health check |
 
 Example response from `/api/conjunctions`:

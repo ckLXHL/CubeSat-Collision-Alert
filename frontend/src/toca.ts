@@ -1,6 +1,9 @@
-import { fetchTOCA, ConjunctionEvent, TOCAPosition } from "./api.js";
+import { twoline2satrec, propagate, eciToEcf, gstime } from "satellite.js";
+import { fetchTOCA, ConjunctionEvent, TLERecord } from "./api.js";
 
-// CesiumJS is loaded globally from CDN — declare the global type
+// ──────────────────────────────────────────────────────────────────────────────
+//  Minimal CesiumJS global type declarations (loaded from CDN)
+// ──────────────────────────────────────────────────────────────────────────────
 declare const Cesium: {
   Ion: { defaultAccessToken: string };
   Viewer: new (container: string | Element, options?: Record<string, unknown>) => CesiumViewer;
@@ -18,7 +21,6 @@ declare const Cesium: {
   Color: {
     CYAN: unknown;
     ORANGE: unknown;
-    fromCssColorString(s: string): unknown;
   };
   ClockRange: { LOOP_STOP: unknown };
   ReferenceFrame: { FIXED: unknown };
@@ -29,20 +31,12 @@ declare const Cesium: {
   buildModuleUrl(resource: string): string;
 };
 
-interface CesiumCartesian3 {
-  x: number;
-  y: number;
-  z: number;
-}
-interface CesiumJulianDate {
-  clone(): CesiumJulianDate;
-}
+interface CesiumCartesian3 { x: number; y: number; z: number }
+interface CesiumJulianDate { clone(): CesiumJulianDate }
 interface CesiumSampledPositionProperty {
   addSample(time: CesiumJulianDate, position: CesiumCartesian3): void;
 }
-interface CesiumTimeline {
-  zoomTo(start: CesiumJulianDate, stop: CesiumJulianDate): void;
-}
+interface CesiumTimeline { zoomTo(start: CesiumJulianDate, stop: CesiumJulianDate): void }
 interface CesiumClock {
   startTime: CesiumJulianDate;
   stopTime: CesiumJulianDate;
@@ -50,9 +44,7 @@ interface CesiumClock {
   clockRange: unknown;
   multiplier: number;
 }
-interface CesiumCamera {
-  flyTo(options: Record<string, unknown>): void;
-}
+interface CesiumCamera { flyTo(options: Record<string, unknown>): void }
 interface CesiumEntityCollection {
   add(entity: Record<string, unknown>): unknown;
   removeAll(): void;
@@ -70,26 +62,52 @@ function formatDate(iso: string): string {
   return new Date(iso).toUTCString().replace("GMT", "UTC");
 }
 
-function cartesianFromECIKm(
-  pos: [number, number, number],
-  _time: Date
-): CesiumCartesian3 {
-  // positions from the API are in ECEF km; convert to metres
-  return new Cesium.Cartesian3(pos[0] * 1000, pos[1] * 1000, pos[2] * 1000);
+// ──────────────────────────────────────────────────────────────────────────────
+//  SGP4 propagation using satellite.js
+//  Generates a ±30-minute position sequence around the TOCA time.
+// ──────────────────────────────────────────────────────────────────────────────
+
+interface PropagatedPoint {
+  time: Date;
+  /** ECEF position in km */
+  x: number;
+  y: number;
+  z: number;
 }
 
-function buildSampledProperty(
-  positions: TOCAPosition[],
-  satKey: "sat1_pos" | "sat2_pos"
-): CesiumSampledPositionProperty {
+function propagateSatellite(tle: TLERecord, tocaMs: number): PropagatedPoint[] {
+  const satrec = twoline2satrec(tle.line1, tle.line2);
+  const windowMs = 30 * 60 * 1000; // ±30 minutes
+  const stepMs = 60 * 1000;        // 1-minute steps
+  const points: PropagatedPoint[] = [];
+
+  for (let t = tocaMs - windowMs; t <= tocaMs + windowMs; t += stepMs) {
+    const date = new Date(t);
+    const result = propagate(satrec, date);
+    const pos = result.position;
+    if (!pos || typeof pos !== "object") continue;
+
+    // Convert ECI → ECEF
+    const gmst = gstime(date);
+    const ecef = eciToEcf(pos as { x: number; y: number; z: number }, gmst);
+    points.push({ time: date, x: ecef.x, y: ecef.y, z: ecef.z });
+  }
+  return points;
+}
+
+function buildSampledProperty(points: PropagatedPoint[]): CesiumSampledPositionProperty {
   const prop = new Cesium.SampledPositionProperty(Cesium.ReferenceFrame.FIXED);
-  for (const p of positions) {
-    const t = Cesium.JulianDate.fromIso8601(p.time);
-    const cart = cartesianFromECIKm(p[satKey], new Date(p.time));
-    prop.addSample(t, cart);
+  for (const p of points) {
+    const jd = Cesium.JulianDate.fromIso8601(p.time.toISOString());
+    // satellite.js returns km; CesiumJS needs metres
+    prop.addSample(jd, new Cesium.Cartesian3(p.x * 1000, p.y * 1000, p.z * 1000));
   }
   return prop;
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+//  Public API
+// ──────────────────────────────────────────────────────────────────────────────
 
 export async function loadTOCAView(evt: ConjunctionEvent): Promise<void> {
   // Update info bar
@@ -111,10 +129,21 @@ export async function loadTOCAView(evt: ConjunctionEvent): Promise<void> {
   container.style.display = "block";
 
   try {
+    // Fetch TLE data from the Worker (no position computation server-side)
     const tocaData = await fetchTOCA(evt.id);
+    const tocaMs = new Date(tocaData.toca).getTime();
 
+    // Propagate positions client-side using satellite.js SGP4
+    const sat1Points = propagateSatellite(tocaData.sat1_tle, tocaMs);
+    const sat2Points = propagateSatellite(tocaData.sat2_tle, tocaMs);
+
+    if (sat1Points.length === 0 || sat2Points.length === 0) {
+      container.innerHTML = `<div class="error-msg" style="margin:20px;">SGP4 propagation returned no positions — TLE may be invalid.</div>`;
+      return;
+    }
+
+    // Initialise or reuse CesiumJS viewer
     if (!viewer) {
-      // Use a token if VITE_CESIUM_TOKEN is set, otherwise use offline imagery
       const token = (import.meta as unknown as { env?: Record<string, string> })
         .env?.VITE_CESIUM_TOKEN;
       if (token) Cesium.Ion.defaultAccessToken = token;
@@ -138,12 +167,10 @@ export async function loadTOCAView(evt: ConjunctionEvent): Promise<void> {
       viewer.entities.removeAll();
     }
 
-    if (tocaData.positions.length === 0) return;
-
-    const start = Cesium.JulianDate.fromIso8601(tocaData.positions[0].time);
-    const stop = Cesium.JulianDate.fromIso8601(
-      tocaData.positions[tocaData.positions.length - 1].time
-    );
+    const startIso = sat1Points[0].time.toISOString();
+    const stopIso = sat1Points[sat1Points.length - 1].time.toISOString();
+    const start = Cesium.JulianDate.fromIso8601(startIso);
+    const stop = Cesium.JulianDate.fromIso8601(stopIso);
     const tocaJD = Cesium.JulianDate.fromIso8601(tocaData.toca);
 
     viewer.clock.startTime = start.clone();
@@ -153,8 +180,8 @@ export async function loadTOCAView(evt: ConjunctionEvent): Promise<void> {
     viewer.clock.multiplier = 30;
     viewer.timeline.zoomTo(start, stop);
 
-    const sat1Prop = buildSampledProperty(tocaData.positions, "sat1_pos");
-    const sat2Prop = buildSampledProperty(tocaData.positions, "sat2_pos");
+    const sat1Prop = buildSampledProperty(sat1Points);
+    const sat2Prop = buildSampledProperty(sat2Points);
 
     viewer.entities.add({
       name: evt.sat1.name,
@@ -162,10 +189,7 @@ export async function loadTOCAView(evt: ConjunctionEvent): Promise<void> {
       point: { pixelSize: 10, color: Cesium.Color.CYAN },
       path: {
         resolution: 1,
-        material: new Cesium.PolylineGlowMaterialProperty({
-          glowPower: 0.2,
-          color: Cesium.Color.CYAN,
-        }),
+        material: new Cesium.PolylineGlowMaterialProperty({ glowPower: 0.2, color: Cesium.Color.CYAN }),
         width: 2,
         leadTime: 0,
         trailTime: 600,
@@ -185,10 +209,7 @@ export async function loadTOCAView(evt: ConjunctionEvent): Promise<void> {
       point: { pixelSize: 10, color: Cesium.Color.ORANGE },
       path: {
         resolution: 1,
-        material: new Cesium.PolylineGlowMaterialProperty({
-          glowPower: 0.2,
-          color: Cesium.Color.ORANGE,
-        }),
+        material: new Cesium.PolylineGlowMaterialProperty({ glowPower: 0.2, color: Cesium.Color.ORANGE }),
         width: 2,
         leadTime: 0,
         trailTime: 600,
@@ -202,18 +223,19 @@ export async function loadTOCAView(evt: ConjunctionEvent): Promise<void> {
       },
     });
 
-    // Fly to TOCA position (midpoint of the two satellites at TOCA)
-    const tocaPos = tocaData.positions.find((p) => p.time === tocaData.toca)
-      ?? tocaData.positions[Math.floor(tocaData.positions.length / 2)];
-    const mid = Cesium.Cartesian3.midpoint(
-      cartesianFromECIKm(tocaPos.sat1_pos, new Date(tocaPos.time)),
-      cartesianFromECIKm(tocaPos.sat2_pos, new Date(tocaPos.time)),
+    // Fly camera to the TOCA position (midpoint between the two satellites at TOCA)
+    const tocaIdx = Math.floor(sat1Points.length / 2);
+    const p1 = sat1Points[tocaIdx];
+    const p2 = sat2Points[tocaIdx];
+    const midCart = Cesium.Cartesian3.midpoint(
+      new Cesium.Cartesian3(p1.x * 1000, p1.y * 1000, p1.z * 1000),
+      new Cesium.Cartesian3(p2.x * 1000, p2.y * 1000, p2.z * 1000),
       new Cesium.Cartesian3()
     );
     viewer.camera.flyTo({
       destination: Cesium.Cartesian3.multiplyByScalar(
-        Cesium.Cartesian3.normalize(mid, new Cesium.Cartesian3()),
-        Cesium.Cartesian3.magnitude(mid) + 2_000_000,
+        Cesium.Cartesian3.normalize(midCart, new Cesium.Cartesian3()),
+        Cesium.Cartesian3.magnitude(midCart) + 2_000_000,
         new Cesium.Cartesian3()
       ),
       duration: 2,
@@ -222,3 +244,4 @@ export async function loadTOCAView(evt: ConjunctionEvent): Promise<void> {
     container.innerHTML = `<div class="error-msg" style="margin:20px;">Failed to load TOCA data: ${(err as Error).message}</div>`;
   }
 }
+

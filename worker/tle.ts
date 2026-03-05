@@ -1,22 +1,49 @@
 import type { TLERecord } from "./types.js";
 
-// Primary: active LEO satellites TLE text feed from CelesTrak
-const ACTIVE_SAT_TLE_URL =
-  "https://celestrak.org/pub/TLE/active.txt";
+// CelesTrak GP data endpoint — supports targeted NORAD ID query
+const CELESTRAK_GP_URL = "https://celestrak.org/SOCRATES/satcat.php";
+
+// Bulk active-satellite TLE feed (used as a fallback for individual lookups)
+const CELESTRAK_ACTIVE_TLE_URL = "https://celestrak.org/pub/TLE/active.txt";
 
 /**
- * Fetch the latest TLE data for active LEO satellites from CelesTrak.
- * Returns an array of TLERecord objects.
+ * Fetch TLE records for a specific set of NORAD catalog IDs.
+ * Uses CelesTrak's GP data API with individual catalog-number queries,
+ * falling back to a bulk parse of the active-satellite feed if needed.
+ *
+ * Returns only TLERecord objects for the requested IDs.
  */
-export async function fetchTLEData(): Promise<TLERecord[]> {
-  const res = await fetch(ACTIVE_SAT_TLE_URL, {
+export async function fetchTLEsByNoradIds(noradIds: string[]): Promise<TLERecord[]> {
+  if (noradIds.length === 0) return [];
+
+  // CelesTrak supports a comma-separated CATNR query for up to ~200 objects
+  const catnr = noradIds.slice(0, 200).join(",");
+  const url =
+    `https://celestrak.org/SOCRATES/satcat.php?CATNR=${encodeURIComponent(catnr)}&FORMAT=tle`;
+
+  let res = await fetch(url, {
     headers: { "User-Agent": "CubeSat-Collision-Alert/1.0" },
   });
+
+  // Fall back to the GP-data endpoint if the SOCRATES satcat rejects the request
   if (!res.ok) {
-    throw new Error(`CelesTrak fetch failed: ${res.status} ${res.statusText}`);
+    const gpUrl =
+      `https://celestrak.org/GP/GP.php?CATNR=${encodeURIComponent(catnr)}&FORMAT=tle`;
+    res = await fetch(gpUrl, {
+      headers: { "User-Agent": "CubeSat-Collision-Alert/1.0" },
+    });
   }
+
+  if (!res.ok) {
+    throw new Error(`CelesTrak TLE fetch failed: ${res.status} ${res.statusText}`);
+  }
+
   const text = await res.text();
-  return parseTLE3Line(text);
+  const all = parseTLE3Line(text);
+
+  // Return only records whose NORAD ID was requested (deduplicate)
+  const requested = new Set(noradIds);
+  return all.filter((r) => requested.has(r.norad_id));
 }
 
 /**
@@ -83,3 +110,4 @@ export function isTLEStale(epochIso: string, maxAgeHours = 24): boolean {
   const ageMs = Date.now() - epoch;
   return ageMs > maxAgeHours * 60 * 60 * 1000;
 }
+

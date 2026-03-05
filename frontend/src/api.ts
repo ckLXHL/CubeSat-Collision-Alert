@@ -30,26 +30,22 @@ export interface TLERecord {
   epoch: string;
 }
 
-export interface TLEResponse {
+export interface HighRiskTLEResponse {
   updated_at: string;
-  total: number;
-  page: number;
-  limit: number;
+  count: number;
   data: TLERecord[];
 }
 
-export interface TOCAPosition {
-  time: string;
-  sat1_pos: [number, number, number];
-  sat2_pos: [number, number, number];
-  distance_km: number;
-}
-
+/**
+ * TOCA response — the Worker returns TLE data for both satellites so the
+ * frontend can run SGP4 propagation client-side using satellite.js.
+ */
 export interface TOCAResponse {
   id: string;
   toca: string;
   min_distance_km: number;
-  positions: TOCAPosition[];
+  sat1_tle: TLERecord;
+  sat2_tle: TLERecord;
 }
 
 export async function fetchConjunctions(): Promise<ConjunctionsResponse> {
@@ -58,20 +54,28 @@ export async function fetchConjunctions(): Promise<ConjunctionsResponse> {
   return res.json();
 }
 
-export async function fetchTLE(page = 1, limit = 100): Promise<TLEResponse> {
-  const res = await fetch(`${API_BASE}/tle?page=${page}&limit=${limit}`);
+/** Fetch TLEs for all satellites currently in the high-risk conjunction list. */
+export async function fetchHighRiskTLE(): Promise<HighRiskTLEResponse> {
+  const res = await fetch(`${API_BASE}/tle/high-risk`);
   if (!res.ok) throw new Error(`API error ${res.status}: ${res.statusText}`);
   return res.json();
 }
 
+/** Fetch TLE for a single satellite by NORAD ID or name. */
 export async function fetchTLEById(id: string): Promise<TLERecord> {
   const res = await fetch(`${API_BASE}/tle/${encodeURIComponent(id)}`);
   if (!res.ok) throw new Error(`API error ${res.status}: ${res.statusText}`);
   return res.json();
 }
 
+/**
+ * Fetch TOCA metadata for a conjunction.
+ * The response contains TLE records for both satellites; SGP4 propagation
+ * is performed client-side via satellite.js.
+ */
 export async function fetchTOCA(conjunctionId: string): Promise<TOCAResponse> {
   const res = await fetch(`${API_BASE}/conjunction/${encodeURIComponent(conjunctionId)}/toca`);
   if (!res.ok) throw new Error(`API error ${res.status}: ${res.statusText}`);
   return res.json();
 }
+

@@ -1,6 +1,5 @@
-import type { KVEnv, TLERecord } from "./types.js";
+import type { KVEnv, TLERecord, TOCAResponse } from "./types.js";
 import { handleCron } from "./cron.js";
-import { computeTOCAPositions } from "./conjunction.js";
 
 // ──────────────────────────────────────────────────────────────────────────────
 //  CORS headers
@@ -50,43 +49,27 @@ async function handleGetConjunctions(env: KVEnv): Promise<Response> {
   });
 }
 
-async function handleGetTLE(env: KVEnv, url: URL): Promise<Response> {
-  const raw = await env.TLE_KV.get("tle:latest");
+/** GET /api/tle/high-risk — all TLEs for satellites in the current high-risk list */
+async function handleGetHighRiskTLE(env: KVEnv): Promise<Response> {
+  const raw = await env.TLE_KV.get("tle:high_risk");
   if (!raw) {
-    return corsResponse({
-      updated_at: new Date().toISOString(),
-      total: 0,
-      page: 1,
-      limit: 100,
-      data: [],
-    });
+    return corsResponse({ updated_at: new Date().toISOString(), count: 0, data: [] });
   }
-
-  const parsed = JSON.parse(raw) as {
-    updated_at: string;
-    count: number;
-    data: TLERecord[];
-  };
-
-  const page = Math.max(1, parseInt(url.searchParams.get("page") ?? "1", 10));
-  const limit = Math.min(1000, Math.max(1, parseInt(url.searchParams.get("limit") ?? "100", 10)));
-  const offset = (page - 1) * limit;
-  const slice = parsed.data.slice(offset, offset + limit);
-
-  return corsResponse({
-    updated_at: parsed.updated_at,
-    total: parsed.count,
-    page,
-    limit,
-    data: slice,
+  return new Response(raw, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json;charset=UTF-8",
+      ...CORS_HEADERS,
+    },
   });
 }
 
+/** GET /api/tle/:id — single TLE by NORAD ID or satellite name */
 async function handleGetTLEById(env: KVEnv, id: string): Promise<Response> {
-  const raw = await env.TLE_KV.get("tle:latest");
+  const raw = await env.TLE_KV.get("tle:high_risk");
   if (!raw) return notFound("No TLE data available");
 
-  const parsed = JSON.parse(raw) as { updated_at: string; count: number; data: TLERecord[] };
+  const parsed = JSON.parse(raw) as { data: TLERecord[] };
   const record = parsed.data.find(
     (r) => r.norad_id === id || r.name.toLowerCase() === id.toLowerCase()
   );
@@ -94,6 +77,13 @@ async function handleGetTLEById(env: KVEnv, id: string): Promise<Response> {
   return corsResponse(record);
 }
 
+/**
+ * GET /api/conjunction/:id/toca
+ *
+ * Returns the TOCA time and the TLE records for both satellites so the
+ * frontend can run SGP4 propagation client-side using satellite.js.
+ * No position computation is performed in the Worker.
+ */
 async function handleGetTOCA(env: KVEnv, conjunctionId: string): Promise<Response> {
   // Conjunction IDs are formatted as evt_{noradId1}_{noradId2}
   const match = conjunctionId.match(/^evt_(\d+)_(\d+)$/);
@@ -101,28 +91,41 @@ async function handleGetTOCA(env: KVEnv, conjunctionId: string): Promise<Respons
 
   const [, id1, id2] = match;
 
-  const raw = await env.TLE_KV.get("tle:latest");
-  if (!raw) return serverError("TLE data not available");
+  // Look up TLEs from the high-risk cache
+  const tleRaw = await env.TLE_KV.get("tle:high_risk");
+  if (!tleRaw) return serverError("TLE data not available -- cron may not have run yet");
 
-  const parsed = JSON.parse(raw) as { data: TLERecord[] };
-  const sat1 = parsed.data.find((r) => r.norad_id === id1);
-  const sat2 = parsed.data.find((r) => r.norad_id === id2);
+  const tleParsed = JSON.parse(tleRaw) as { data: TLERecord[] };
+  const sat1 = tleParsed.data.find((r) => r.norad_id === id1);
+  const sat2 = tleParsed.data.find((r) => r.norad_id === id2);
 
   if (!sat1 || !sat2) {
-    return notFound(`One or both satellites not found (${id1}, ${id2})`);
+    return notFound(`TLE not found for one or both satellites (${id1}, ${id2})`);
   }
 
-  // Get TOCA time from the conjunction list
+  // Look up TOCA time from the conjunction list
   const conjRaw = await env.TLE_KV.get("conjunctions:latest");
   let tocaIso = new Date().toISOString();
+  let minDistKm = 0;
   if (conjRaw) {
-    const conjData = JSON.parse(conjRaw) as { conjunctions: { id: string; toca: string }[] };
+    const conjData = JSON.parse(conjRaw) as {
+      conjunctions: { id: string; toca: string; min_distance_km: number }[];
+    };
     const evt = conjData.conjunctions.find((e) => e.id === conjunctionId);
-    if (evt) tocaIso = evt.toca;
+    if (evt) {
+      tocaIso = evt.toca;
+      minDistKm = evt.min_distance_km;
+    }
   }
 
-  const tocaData = computeTOCAPositions(sat1, sat2, tocaIso);
-  return corsResponse(tocaData);
+  const response: TOCAResponse = {
+    id: conjunctionId,
+    toca: tocaIso,
+    min_distance_km: minDistKm,
+    sat1_tle: sat1,
+    sat2_tle: sat2,
+  };
+  return corsResponse(response);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -143,9 +146,9 @@ export default {
       return handleGetConjunctions(env);
     }
 
-    // Route: GET /api/tle
-    if (path === "/api/tle" && request.method === "GET") {
-      return handleGetTLE(env, url);
+    // Route: GET /api/tle/high-risk  (must be checked before /api/tle/:id)
+    if (path === "/api/tle/high-risk" && request.method === "GET") {
+      return handleGetHighRiskTLE(env);
     }
 
     // Route: GET /api/tle/:id
@@ -176,3 +179,4 @@ export default {
     await handleCron(env);
   },
 };
+
