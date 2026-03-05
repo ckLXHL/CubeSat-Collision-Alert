@@ -1,0 +1,14 @@
+{
+  "name": "cubesat-collision-alert",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev:worker": "wrangler dev",
+    "build:frontend": "cd frontend && npm run build",
+    "deploy:worker": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}
